@@ -10,12 +10,9 @@ namespace FactorioMCP.Services;
 /// 
 /// Design: All navigation logic runs in C#, with Lua only used for:
 ///   1. Requesting paths (async via request_path)
-///   2. Receiving path results (minimal event handler)
-///   3. Continuous walking via on_tick handler (Factorio 2 resets walking_state each tick)
-/// 
-/// In Factorio 2, walking_state only persists for a single tick, so a Lua on_tick handler
-/// must re-apply the walking direction every tick. C# controls the direction by writing
-/// to storage.walk_dir, and the on_tick handler reads it to keep the player moving.
+///   2. Receiving path results through the persistent bridge mod
+///   3. Continuous walking via the bridge's on_tick handler
+/// In Factorio 2, walking_state only persists for a single tick.
 /// </summary>
 internal sealed class PathfindingService(RconClient rcon)
 {
@@ -24,7 +21,6 @@ internal sealed class PathfindingService(RconClient rcon)
     /// </summary>
     internal TimeSpan PollInterval { get; set; } = TimeSpan.FromMilliseconds(25);
 
-    private bool _pathHandlerInstalled;
     private int? _lastDirection;
 
     // ── Public API ──────────────────────────────────────────────────
@@ -40,7 +36,9 @@ internal sealed class PathfindingService(RconClient rcon)
         double timeoutSeconds,
         CancellationToken cancellationToken = default)
     {
-        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(timeoutSeconds, 0.5));
+        if (!double.IsFinite(timeoutSeconds) || timeoutSeconds <= 0)
+            throw new ArgumentOutOfRangeException(nameof(timeoutSeconds), "Timeout must be positive and finite.");
+        var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(timeoutSeconds);
 
         // Check if already at target
         var (px, py) = await GetPositionAsync(cancellationToken);
@@ -49,9 +47,6 @@ internal sealed class PathfindingService(RconClient rcon)
         if (dist <= tolerance)
             return FormatResult("arrived", px, py, targetX, targetY, dist, tolerance);
 
-        // Ensure path handler is installed (once per session)
-        await EnsurePathHandlerInstalledAsync(cancellationToken);
-
         // Request path from Factorio's A* pathfinder
         var requestId = await RequestPathAsync(targetX, targetY, tolerance, cancellationToken);
         if (requestId < 0)
@@ -59,9 +54,10 @@ internal sealed class PathfindingService(RconClient rcon)
 
         // Wait for path computation (usually 1-2 game ticks)
         List<(double x, double y)>? waypoints = null;
-        for (int i = 0; i < 20 && waypoints is null; i++)
+        while (DateTime.UtcNow < deadline && waypoints is null)
         {
             await Task.Delay(TimeSpan.FromMilliseconds(100), cancellationToken);
+            if (DateTime.UtcNow >= deadline) break;
             var (status, path) = await GetPathResultAsync(requestId, cancellationToken);
 
             if (status == "ok" && path is not null)
@@ -75,15 +71,26 @@ internal sealed class PathfindingService(RconClient rcon)
             {
                 // Pathfinder overloaded — old request already cleaned up by
                 // GetPathResultAsync (non-ok entries are nil'd), just retry
-                await Task.Delay(TimeSpan.FromSeconds(1), cancellationToken);
+                var retryDelay = deadline - DateTime.UtcNow;
+                if (retryDelay <= TimeSpan.Zero) break;
+                await Task.Delay(retryDelay < TimeSpan.FromSeconds(1) ? retryDelay : TimeSpan.FromSeconds(1),
+                    cancellationToken);
+                if (DateTime.UtcNow >= deadline) break;
                 requestId = await RequestPathAsync(targetX, targetY, tolerance, cancellationToken);
                 if (requestId < 0)
                     return FormatResult("no_character", px, py, targetX, targetY, dist, tolerance);
             }
         }
 
-        if (waypoints is null || waypoints.Count == 0)
+        if (waypoints is null)
+            return WithDiagnostics(
+                FormatResult("timeout", px, py, targetX, targetY, dist, tolerance),
+                "path_request", await GetNavigationDiagnosticsAsync(cancellationToken));
+
+        if (waypoints.Count == 0)
             return FormatResult("no_path", px, py, targetX, targetY, dist, tolerance);
+
+        waypoints.Insert(0, (px, py));
 
         // Draw debug visualization
         await DrawPathAsync(waypoints, tolerance, cancellationToken);
@@ -117,7 +124,8 @@ internal sealed class PathfindingService(RconClient rcon)
         int segIndex = 0;
         double bestProgress = 0; // cumulative distance along path (for stuck detection)
         int stuckCount = 0;
-        const int maxStuckCount = 60; // ~3 seconds at 50ms poll
+        const int maxStuckCount = 60;
+        long? stationarySinceTick = null;
 
         try
         {
@@ -131,19 +139,11 @@ internal sealed class PathfindingService(RconClient rcon)
                 var dist = Distance(px, py, targetX, targetY);
                 if (dist <= tolerance)
                 {
-                    await StopWalkingAsync(cancellationToken);
                     return FormatResult("arrived", px, py, targetX, targetY, dist, tolerance);
                 }
 
                 // Advance segments using projection
-                segIndex = AdvanceSegment(waypoints, segIndex, px, py);
-
-                // Past last segment — arrived (close enough to final waypoint)
-                if (segIndex >= waypoints.Count - 1)
-                {
-                    await StopWalkingAsync(cancellationToken);
-                    return FormatResult("arrived", px, py, targetX, targetY, dist, tolerance);
-                }
+                segIndex = Math.Min(AdvanceSegment(waypoints, segIndex, px, py), waypoints.Count - 2);
 
                 // Stuck detection: measure progress along the path, not toward the goal.
                 // Progress = sum of completed segment lengths + projection on current segment.
@@ -152,6 +152,7 @@ internal sealed class PathfindingService(RconClient rcon)
                 {
                     bestProgress = progress;
                     stuckCount = 0;
+                    stationarySinceTick = null;
                 }
                 else
                 {
@@ -160,8 +161,16 @@ internal sealed class PathfindingService(RconClient rcon)
 
                 if (stuckCount > maxStuckCount)
                 {
-                    await StopWalkingAsync(cancellationToken);
-                    return FormatResult("stuck", px, py, targetX, targetY, dist, tolerance);
+                    var diagnostics = await GetNavigationDiagnosticsAsync(cancellationToken);
+                    var tick = diagnostics.GetProperty("tick").GetInt64();
+                    stationarySinceTick ??= tick;
+                    // RCON polls can run while simulation ticks are paused or delayed.
+                    if (tick - stationarySinceTick.Value >= 180)
+                    {
+                        return WithDiagnostics(
+                            FormatResult("stuck", px, py, targetX, targetY, dist, tolerance),
+                            "walking", diagnostics);
+                    }
                 }
 
                 // Steer toward the endpoint of the current segment
@@ -172,18 +181,18 @@ internal sealed class PathfindingService(RconClient rcon)
 
                 await Task.Delay(PollInterval, cancellationToken);
             }
-        }
-        catch (OperationCanceledException)
-        {
-            try { await StopWalkingAsync(CancellationToken.None); } catch { }
-            throw;
-        }
 
-        // Timeout
-        await StopWalkingAsync(cancellationToken);
-        var (finalX, finalY) = await GetPositionAsync(cancellationToken);
-        var finalDist = Distance(finalX, finalY, targetX, targetY);
-        return FormatResult("timeout", finalX, finalY, targetX, targetY, finalDist, tolerance);
+            var timeoutDiagnostics = await GetNavigationDiagnosticsAsync(cancellationToken);
+            var (finalX, finalY) = await GetPositionAsync(cancellationToken);
+            var finalDist = Distance(finalX, finalY, targetX, targetY);
+            return WithDiagnostics(
+                FormatResult("timeout", finalX, finalY, targetX, targetY, finalDist, tolerance),
+                "walking", timeoutDiagnostics);
+        }
+        finally
+        {
+            await StopWalkingAsync(CancellationToken.None);
+        }
     }
 
     /// <summary>
@@ -325,33 +334,25 @@ internal sealed class PathfindingService(RconClient rcon)
 
     // ── Lua Commands ────────────────────────────────────────────────
 
-    /// <summary>
-    /// Install the path result handler and shared on_tick handler once per session.
-    /// The on_tick handler continuously re-applies walking_state because Factorio 2
-    /// resets it every tick — a single set only moves the player for one tick.
-    /// </summary>
-    private async Task EnsurePathHandlerInstalledAsync(CancellationToken cancellationToken)
+    private async Task<JsonElement> GetNavigationDiagnosticsAsync(CancellationToken cancellationToken)
     {
-        if (_pathHandlerInstalled) return;
-
-        await rcon.ExecuteLuaAsync($$"""
-            storage.nav_results = storage.nav_results or {}
-            storage.walk_dir = nil
-            script.on_event(defines.events.on_script_path_request_finished, function(event)
-                if event.path and #event.path > 0 then
-                    storage.nav_results[event.id] = {status = "ok", path = event.path, tick = game.tick}
-                elseif event.try_again_later then
-                    storage.nav_results[event.id] = {status = "busy", tick = game.tick}
-                else
-                    storage.nav_results[event.id] = {status = "no_path", tick = game.tick}
-                end
-            end)
-            {{FactorioService.LuaOnTickHandler}}
-            rcon.print('ok')
+        var json = await rcon.ExecuteLuaAsync("""
+            local p = game.connected_players[1]
+            local navigation_diagnostics = {
+                tick = game.tick, speed = game.speed,
+                player_index = p.index, surface_index = p.surface.index,
+                x = p.position.x, y = p.position.y,
+                walking = p.walking_state.walking, direction = p.walking_state.direction
+            }
+            rcon.print(helpers.table_to_json(navigation_diagnostics))
             """, cancellationToken);
-
-        _pathHandlerInstalled = true;
+        using var document = JsonDocument.Parse(json);
+        return document.RootElement.Clone();
     }
+
+    private static string WithDiagnostics(string result, string phase, JsonElement diagnostics) =>
+        result[..^1] + ",\"phase\":" + JsonSerializer.Serialize(phase) +
+        ",\"diagnostics\":" + diagnostics.GetRawText() + "}";
 
     /// <summary>
     /// Request a path from Factorio's A* pathfinder.
@@ -366,16 +367,7 @@ internal sealed class PathfindingService(RconClient rcon)
                 rcon.print('-1')
                 return
             end
-            local id = p.surface.request_path{
-                bounding_box = p.character.prototype.collision_box,
-                collision_mask = p.character.prototype.collision_mask,
-                start = p.position,
-                goal = {x={{targetX}}, y={{targetY}}},
-                force = p.force,
-                radius = {{tolerance}},
-                entity_to_ignore = p.character,
-                pathfind_flags = {prefer_straight_paths = true, no_break = true}
-            }
+            local id = remote.call("factorio_mcp_bridge", "request_path", {{targetX}}, {{targetY}}, {{tolerance}})
             rcon.print(tostring(id))
             """);
 
@@ -390,21 +382,12 @@ internal sealed class PathfindingService(RconClient rcon)
         int requestId, CancellationToken cancellationToken)
     {
         var lua = string.Create(CultureInfo.InvariantCulture, $$"""
-            if storage.nav_results then
-                local now = game.tick
-                for id, r in pairs(storage.nav_results) do
-                    if now - (r.tick or 0) > 600 then
-                        storage.nav_results[id] = nil
-                    end
-                end
-            end
-            local r = storage.nav_results and storage.nav_results[{{requestId}}]
+            local r = remote.call("factorio_mcp_bridge", "take_path_result", {{requestId}})
             if not r then
                 rcon.print('{"status":"waiting"}')
                 return
             end
             if r.status ~= "ok" then
-                storage.nav_results[{{requestId}}] = nil
                 rcon.print('{"status":"'..r.status..'"}')
                 return
             end
@@ -412,7 +395,6 @@ internal sealed class PathfindingService(RconClient rcon)
             for i, wp in ipairs(r.path) do
                 pts[i] = '{"x":'..wp.position.x..',"y":'..wp.position.y..'}'
             end
-            storage.nav_results[{{requestId}}] = nil
             rcon.print('{"status":"ok","path":['..table.concat(pts, ',')..']}')
             """);
 
@@ -441,20 +423,24 @@ internal sealed class PathfindingService(RconClient rcon)
     private async Task StopWalkingAsync(CancellationToken cancellationToken)
     {
         _lastDirection = null;
-        await rcon.ExecuteLuaAsync("""
-            storage.walk_dir = nil
+        var response = await rcon.ExecuteLuaAsync("""
+            remote.call("factorio_mcp_bridge", "set_walking", nil)
             game.connected_players[1].walking_state = {walking = false, direction = defines.direction.north}
             rcon.print('ok')
             """, cancellationToken);
+        if (response.Trim() != "ok")
+            throw new InvalidOperationException($"Failed to stop walking; bridge control may still be active: {response}");
     }
 
     private async Task SetWalkingDirectionAsync(int direction, CancellationToken cancellationToken)
     {
-        _lastDirection = direction;
-        await rcon.ExecuteLuaAsync(string.Create(CultureInfo.InvariantCulture, $$"""
-            storage.walk_dir = {{direction}}
+        var response = await rcon.ExecuteLuaAsync(string.Create(CultureInfo.InvariantCulture, $$"""
+            remote.call("factorio_mcp_bridge", "set_walking", {{direction}})
             rcon.print('ok')
             """), cancellationToken);
+        if (response.Trim() != "ok")
+            throw new InvalidOperationException($"Failed to set walking direction: {response}");
+        _lastDirection = direction;
     }
 
     /// <summary>

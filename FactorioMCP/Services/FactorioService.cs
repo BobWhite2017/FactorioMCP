@@ -17,6 +17,18 @@ internal sealed partial class FactorioService(RconClient rcon)
     /// </summary>
     internal const string LuaJsonEscape = """local function esc(s) return s:gsub('\\', '\\\\'):gsub('"', '\\"') end""";
 
+    internal const string LuaInventoryTypes = """
+        local function inventory_type(name)
+            local aliases = {
+                furnace_source = "crafter_input",
+                furnace_result = "crafter_output",
+                assembling_machine_input = "crafter_input",
+                assembling_machine_output = "crafter_output"
+            }
+            return defines.inventory[aliases[name] or name]
+        end
+        """;
+
     /// <summary>
     /// Lua helper that sorts entity list so non-resource entities come first,
     /// nearest to the query position, and filters out the player character entity.
@@ -44,27 +56,6 @@ internal sealed partial class FactorioService(RconClient rcon)
                 return false
             end)
         end
-        """;
-
-    /// <summary>
-    /// Lua on_tick handler that continuously re-applies walking_state and mining_state
-    /// every tick. Required in Factorio 2 where both states reset after each tick.
-    /// Reads from <c>storage.walk_dir</c> (set by PathfindingService) and
-    /// <c>storage.mine_state</c> (set by MiningService).
-    /// </summary>
-    internal const string LuaOnTickHandler = """
-        script.on_event(defines.events.on_tick, function()
-            local p = game.connected_players[1]
-            if not p then return end
-            local d = storage.walk_dir
-            if d ~= nil and p.character and p.character.valid then
-                p.walking_state = {walking = true, direction = d}
-            end
-            if storage.mine_state then
-                p.update_selected_entity(storage.mine_state.position)
-                p.mining_state = {mining = true, position = storage.mine_state.position}
-            end
-        end)
         """;
 
     /// <summary>

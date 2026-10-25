@@ -56,8 +56,9 @@ public partial class FactorioServiceTests
         Assert.Contains("coal", insertCmd);
         Assert.Contains("10", insertCmd);
         Assert.Contains("inv.insert", insertCmd);
-        Assert.Contains("defines.inventory.fuel", insertCmd);
-        Assert.Contains("defines.inventory.chest", insertCmd);
+        Assert.Contains("""inventory_type("fuel")""", insertCmd);
+        Assert.Contains("defines.inventory[aliases[name] or name]", insertCmd);
+        Assert.Contains("player.can_reach_entity(e)", insertCmd);
 
         // Remove: verify item name, count, and transfer to player
         await _service.RemoveItemsAsync(5.0, 3.0, "iron-plate", 20, "furnace_result");
@@ -67,6 +68,6 @@ public partial class FactorioServiceTests
         Assert.Contains("20", removeCmd);
         Assert.Contains("inv.remove", removeCmd);
         Assert.Contains("player.insert", removeCmd);
-        Assert.Contains("defines.inventory.furnace_result", removeCmd);
+        Assert.Contains("""inventory_type("furnace_result")""", removeCmd);
     }
 }

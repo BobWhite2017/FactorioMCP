@@ -178,6 +178,31 @@ internal sealed partial class FactorioService
         return rcon.ExecuteLuaAsync(lua, cancellationToken);
     }
     /// <summary>
+    /// Check legal player interaction range for the non-resource entity at a position.
+    /// </summary>
+    public Task<string> GetEntityReachAsync(double x, double y, CancellationToken cancellationToken = default)
+    {
+        var lua = string.Create(CultureInfo.InvariantCulture, $$"""
+            {{LuaEntitySort}}
+            local player = game.connected_players[1]
+            local entities = player.surface.find_entities_filtered{position={{{x}},{{y}}}, radius=1}
+            sort_entities(entities, {{x}}, {{y}})
+            local e = nil
+            for _, ent in pairs(entities) do
+                if ent.type ~= "resource" then e = ent break end
+            end
+            if not e then
+                rcon.print('{"success":false,"error":"no_entity"}')
+                return
+            end
+            local p = player.position
+            local dx, dy = {{x}} - p.x, {{y}} - p.y
+            rcon.print('{"success":true,"can_reach":'..tostring(player.can_reach_entity(e))..',"x":'..p.x..',"y":'..p.y..',"distance":'..math.sqrt(dx*dx + dy*dy)..'}')
+            """);
+        return rcon.ExecuteLuaAsync(lua, cancellationToken);
+    }
+
+    /// <summary>
     /// Insert items from the player's inventory into a nearby entity's inventory.
     /// Supports specifying the target inventory slot (fuel, input, output, etc.).
     /// Validates proximity before interacting.
@@ -196,10 +221,6 @@ internal sealed partial class FactorioService
             local dx = {{x}} - player_pos.x
             local dy = {{y}} - player_pos.y
             local distance = math.sqrt(dx*dx + dy*dy)
-            if distance > player.reach_distance then
-                rcon.print('{"success":false,"error":"out_of_range","distance":'..string.format("%.1f", distance)..',"limit":'..player.reach_distance..'}')
-                return
-            end
             local entities = player.surface.find_entities_filtered{position={{{x}},{{y}}}, radius=1}
             sort_entities(entities, {{x}}, {{y}})
             local e = nil
@@ -210,16 +231,12 @@ internal sealed partial class FactorioService
                 rcon.print('{"success":false,"error":"no_entity","x":{{x}},"y":{{y}}}')
                 return
             end
-            -- Map inventory type string to defines
-            local inv_map = {
-                fuel = defines.inventory.fuel,
-                furnace_source = defines.inventory.furnace_source,
-                furnace_result = defines.inventory.furnace_result,
-                chest = defines.inventory.chest,
-                assembling_machine_input = defines.inventory.assembling_machine_input,
-                assembling_machine_output = defines.inventory.assembling_machine_output
-            }
-            local inv_type = inv_map["{{inventoryType}}"]
+            if not player.can_reach_entity(e) then
+                rcon.print('{"success":false,"error":"out_of_range","distance":'..string.format("%.1f", distance)..',"limit":'..player.reach_distance..'}')
+                return
+            end
+            {{LuaInventoryTypes}}
+            local inv_type = inventory_type("{{inventoryType}}")
             if not inv_type then
                 rcon.print('{"success":false,"error":"invalid_inventory_type","inventory_type":"{{inventoryType}}"}')
                 return
@@ -264,10 +281,6 @@ internal sealed partial class FactorioService
             local dx = {{x}} - player_pos.x
             local dy = {{y}} - player_pos.y
             local distance = math.sqrt(dx*dx + dy*dy)
-            if distance > player.reach_distance then
-                rcon.print('{"success":false,"error":"out_of_range","distance":'..string.format("%.1f", distance)..',"limit":'..player.reach_distance..'}')
-                return
-            end
             local entities = player.surface.find_entities_filtered{position={{{x}},{{y}}}, radius=1}
             sort_entities(entities, {{x}}, {{y}})
             local e = nil
@@ -278,15 +291,12 @@ internal sealed partial class FactorioService
                 rcon.print('{"success":false,"error":"no_entity","x":{{x}},"y":{{y}}}')
                 return
             end
-            local inv_map = {
-                fuel = defines.inventory.fuel,
-                furnace_source = defines.inventory.furnace_source,
-                furnace_result = defines.inventory.furnace_result,
-                chest = defines.inventory.chest,
-                assembling_machine_input = defines.inventory.assembling_machine_input,
-                assembling_machine_output = defines.inventory.assembling_machine_output
-            }
-            local inv_type = inv_map["{{inventoryType}}"]
+            if not player.can_reach_entity(e) then
+                rcon.print('{"success":false,"error":"out_of_range","distance":'..string.format("%.1f", distance)..',"limit":'..player.reach_distance..'}')
+                return
+            end
+            {{LuaInventoryTypes}}
+            local inv_type = inventory_type("{{inventoryType}}")
             if not inv_type then
                 rcon.print('{"success":false,"error":"invalid_inventory_type","inventory_type":"{{inventoryType}}"}')
                 return
@@ -368,11 +378,15 @@ internal sealed partial class FactorioService
                 result = result..',"recipe":"'..esc(recipe.name)..'"'
             end
             -- Inventories
-            local inv_names = {"fuel", "furnace_source", "furnace_result", "chest", "assembling_machine_input", "assembling_machine_output"}
-            local inv_defines = {defines.inventory.fuel, defines.inventory.furnace_source, defines.inventory.furnace_result, defines.inventory.chest, defines.inventory.assembling_machine_input, defines.inventory.assembling_machine_output}
+            {{LuaInventoryTypes}}
+            local inv_names = e.type == "furnace"
+                and {"fuel", "furnace_source", "furnace_result"}
+                or (e.type == "container" or e.type == "logistic-container")
+                    and {"chest"}
+                or {"fuel", "assembling_machine_input", "assembling_machine_output"}
             local inv_parts = {}
             for i, inv_name in pairs(inv_names) do
-                local inv = e.get_inventory(inv_defines[i])
+                local inv = e.get_inventory(inventory_type(inv_name))
                 if inv then
                     local contents = inv.get_contents()
                     local items = {}
@@ -471,7 +485,13 @@ internal sealed partial class FactorioService
                 return
             end
             local e = entities[1]
-            local inv = e.get_inventory(defines.inventory.{{inventoryType}})
+            {{LuaInventoryTypes}}
+            local inv_type = inventory_type("{{inventoryType}}")
+            if not inv_type then
+                rcon.print('{"success":false,"error":"invalid_inventory_type","inventory_type":"{{inventoryType}}"}')
+                return
+            end
+            local inv = e.get_inventory(inv_type)
             if not inv then
                 rcon.print('{"success":false,"error":"no_inventory","entity":"'..esc(e.name)..'","inventory_type":"{{inventoryType}}"}')
                 return
@@ -523,7 +543,13 @@ internal sealed partial class FactorioService
                 return
             end
             local e = entities[1]
-            local inv = e.get_inventory(defines.inventory.{{inventoryType}})
+            {{LuaInventoryTypes}}
+            local inv_type = inventory_type("{{inventoryType}}")
+            if not inv_type then
+                rcon.print('{"success":false,"error":"invalid_inventory_type","inventory_type":"{{inventoryType}}"}')
+                return
+            end
+            local inv = e.get_inventory(inv_type)
             if not inv then
                 rcon.print('{"success":false,"error":"no_inventory","entity":"'..esc(e.name)..'","inventory_type":"{{inventoryType}}"}')
                 return

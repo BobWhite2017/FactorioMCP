@@ -15,6 +15,7 @@ internal class RconClient : IAsyncDisposable, IDisposable
     private readonly ILogger<RconClient> _logger;
     private TcpClient? _tcp;
     private NetworkStream? _stream;
+    private RconEndpointLease? _controlLease;
     private int _nextRequestId;
     private readonly SemaphoreSlim _lock = new(1, 1);
 
@@ -43,6 +44,13 @@ internal class RconClient : IAsyncDisposable, IDisposable
     /// Whether the client is currently connected to the RCON server.
     /// </summary>
     public bool IsConnected => _tcp is { Connected: true } && _stream is not null;
+
+    internal void AcquireControlLease(string host, int port, string? directory = null)
+    {
+        if (_controlLease is not null)
+            throw new InvalidOperationException("This MCP client already holds an endpoint control lease.");
+        _controlLease = RconEndpointLease.Acquire(host, port, directory);
+    }
 
     /// <summary>
     /// Connect to the RCON server and authenticate with the given password.
@@ -357,6 +365,7 @@ internal class RconClient : IAsyncDisposable, IDisposable
 
         _tcp?.Dispose();
         _lock.Dispose();
+        _controlLease?.Dispose();
     }
 
     public void Dispose()
@@ -364,5 +373,6 @@ internal class RconClient : IAsyncDisposable, IDisposable
         _stream?.Dispose();
         _tcp?.Dispose();
         _lock.Dispose();
+        _controlLease?.Dispose();
     }
 }

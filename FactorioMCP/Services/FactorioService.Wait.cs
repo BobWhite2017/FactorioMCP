@@ -217,15 +217,8 @@ internal sealed partial class FactorioService
                 rcon.print('{"error":"no_entity","x":{{x}},"y":{{y}}}')
                 return
             end
-            local inv_map = {
-                fuel = defines.inventory.fuel,
-                furnace_source = defines.inventory.furnace_source,
-                furnace_result = defines.inventory.furnace_result,
-                chest = defines.inventory.chest,
-                assembling_machine_input = defines.inventory.assembling_machine_input,
-                assembling_machine_output = defines.inventory.assembling_machine_output
-            }
-            local inv_type = inv_map["{{inventoryType}}"]
+            {{LuaInventoryTypes}}
+            local inv_type = inventory_type("{{inventoryType}}")
             if not inv_type then
                 rcon.print('{"error":"invalid_inventory_type","inventory_type":"{{inventoryType}}"}')
                 return

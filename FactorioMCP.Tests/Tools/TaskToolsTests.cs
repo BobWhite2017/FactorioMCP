@@ -21,6 +21,34 @@ public class TaskToolsTests
     // ══════════════════════════════════════════════════════════════════
 
     [Fact]
+    public async Task GatherResource_ApproachesActualResourceBeforeStartingMining()
+    {
+        var rcon = new ScriptedRconClient([
+            """{"success":true,"best_patch":{"center_x":0,"center_y":0}}""",
+            """{"x":0,"y":0}""",
+            """{"success":true,"x":8,"y":0,"distance":8}""",
+            """{"x":0,"y":0}""",
+            "1",
+            """{"status":"ok","path":[{"x":0,"y":0},{"x":8,"y":0}]}""",
+            "ok",
+            """{"x":8,"y":0}""",
+            "ok",
+            """{"success":true,"entity":"iron-ore","amount":100}""",
+            """{"is_mining":true,"depleted":false,"remaining":99,"mined":1}""",
+            """{"success":true,"status":"mining_stopped"}"""
+        ]);
+        var tools = CreateTools(new FactorioService(rcon), new PathfindingService(rcon),
+            new MiningService(rcon), CreateBuildingMemory(), new GameCommandQueue());
+
+        var result = await tools.GatherResource("iron-ore", count: 1);
+
+        Assert.Contains("\"status\":\"complete\"", result);
+        var pathIndex = rcon.AllCommands.FindIndex(command => command.Contains("\"request_path\", 8, 0, 0.5"));
+        var mineIndex = rcon.AllCommands.FindIndex(command => command.Contains("\"set_mining\", epos"));
+        Assert.True(pathIndex >= 0 && mineIndex > pathIndex);
+    }
+
+    [Fact]
     public async Task GatherResource_FindsPatchWalksAndMines()
     {
         var rcon = new ScriptedRconClient([
@@ -28,8 +56,6 @@ public class TaskToolsTests
             """{"success":true,"resource":"iron-ore","best_patch":{"center_x":30.0,"center_y":10.0,"count":50,"total_amount":10000,"distance":31.6},"total_entities":50,"total_patches":2,"alternatives":[]}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -42,6 +68,7 @@ public class TaskToolsTests
             """ok""",
             // 9. FindNearestEntity → resource entity nearby
             """{"success":true,"entity":"iron-ore","type":"resource","x":29.5,"y":9.5,"distance":0.7,"total_found":10}""",
+            """{"x":29.5,"y":9.5}""",
             // 10. MiningService.StartMiningResource
             """{"success":true,"entity":"iron-ore","amount":50,"mining_time_per_unit":0.50,"x":29.5,"y":9.5,"status":"mining_started"}""",
             // 11. MiningService.GetMiningStatus — mined enough
@@ -92,8 +119,6 @@ public class TaskToolsTests
             """{"success":true,"resource":"coal","best_patch":{"center_x":50.0,"center_y":0.0,"count":100,"total_amount":50000,"distance":50.0},"total_entities":100,"total_patches":1,"alternatives":[]}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (no path found)
@@ -114,7 +139,7 @@ public class TaskToolsTests
     }
 
     [Fact]
-    public async Task GatherResource_NearbyEntityNotFound_FallsBackToPatchCenter()
+    public async Task GatherResource_NearbyEntityNotFound_ReturnsErrorWithoutMining()
     {
         var rcon = new ScriptedRconClient([
             // 1. FindBestResourcePatch → patch at (10, 5)
@@ -140,10 +165,9 @@ public class TaskToolsTests
         var result = await tools.GatherResource("stone", count: 10);
 
         Assert.Contains("\"operation\":\"gather\"", result);
-        Assert.Contains("\"resource\":\"stone\"", result);
-        // Should use patch center coordinates since nearby entity wasn't found
-        Assert.Contains("\"target_x\":10", result);
-        Assert.Contains("\"target_y\":5", result);
+        Assert.Contains("\"target\":\"stone\"", result);
+        Assert.Contains("\"error\":\"no_resource\"", result);
+        Assert.DoesNotContain(rcon.AllCommands, command => command.Contains("\"set_mining\""));
     }
 
     [Fact]
@@ -156,6 +180,7 @@ public class TaskToolsTests
             """{"x":14,"y":0}""",
             // 3. FindNearestEntity
             """{"success":true,"entity":"copper-ore","type":"resource","x":14.5,"y":0.5,"distance":0.7,"total_found":5}""",
+            """{"x":14.5,"y":0.5}""",
             // 4. MiningService.StartMiningResource
             """{"success":true,"entity":"copper-ore","amount":30,"mining_time_per_unit":0.50,"x":14.5,"y":0.5,"status":"mining_started"}""",
             // 5. MiningService.GetMiningStatus — mined enough
@@ -196,8 +221,6 @@ public class TaskToolsTests
             """{"x":0,"y":0}""",
             // 2. PathfindingService.GetPositionAsync (initial check in WalkToAsync)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -260,8 +283,6 @@ public class TaskToolsTests
             """{"x":0,"y":0}""",
             // 2. PathfindingService.GetPositionAsync (initial check in WalkToAsync)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (no path found)
@@ -339,13 +360,74 @@ public class TaskToolsTests
     // ══════════════════════════════════════════════════════════════════
 
     [Fact]
+    public async Task Smelt_ZeroFuelCount_SkipsRefuelingAndCollectsOutput()
+    {
+        var rcon = new ScriptedRconClient([
+            """{"success":true,"can_reach":true,"x":-14.21,"y":-2.74,"distance":5.3}""",
+            """{"success":true,"entity":"stone-furnace","inserted":2}""",
+            """{"source_count":0,"result_count":2,"status":"idle"}""",
+            """{"success":true,"removed":2,"transferred":2}"""
+        ]);
+        var tools = CreateTools(new FactorioService(rcon), new PathfindingService(rcon),
+            new MiningService(rcon), CreateBuildingMemory(), new GameCommandQueue());
+
+        var result = await tools.Smelt("iron-ore", "iron-plate", 2, "wood", 0, -19, -5);
+
+        Assert.Contains("\"success\":true", result);
+        Assert.Contains("\"fuel_inserted\":0", result);
+        Assert.Contains("\"output_collected\":2", result);
+        Assert.Equal(4, rcon.AllCommands.Count);
+        Assert.DoesNotContain(rcon.AllCommands, command => command.Contains("inventory_type(\"fuel\")"));
+    }
+
+    [Theory]
+    [InlineData(0, 5)]
+    [InlineData(-1, 5)]
+    [InlineData(int.MinValue, 0)]
+    [InlineData(2, -1)]
+    [InlineData(2, int.MinValue)]
+    [InlineData(0, -1)]
+    public async Task Smelt_InvalidCounts_ReturnsErrorBeforeAnyGameCommands(int count, int fuelCount)
+    {
+        var rcon = new ScriptedRconClient([]);
+        var tools = CreateTools(new FactorioService(rcon), new PathfindingService(rcon),
+            new MiningService(rcon), CreateBuildingMemory(), new GameCommandQueue());
+
+        var result = await tools.Smelt("iron-ore", "iron-plate", count, fuelCount: fuelCount);
+
+        Assert.Contains("\"success\":false", result);
+        Assert.Contains("\"error\":\"invalid_count\"", result);
+        Assert.Empty(rcon.AllCommands);
+    }
+
+    [Fact]
+    public async Task Smelt_ReachableFurnaceBeyondTwoTiles_SkipsWalking()
+    {
+        var rcon = new ScriptedRconClient([
+            """{"success":true,"can_reach":true,"x":-14.21,"y":-2.74,"distance":5.3}""",
+            """{"success":true,"entity":"stone-furnace","inserted":2}""",
+            """{"success":true,"entity":"stone-furnace","inserted":1}""",
+            """{"source_count":0,"result_count":2,"status":"idle"}""",
+            """{"success":true,"removed":2,"transferred":2}"""
+        ]);
+        var tools = CreateTools(new FactorioService(rcon), new PathfindingService(rcon),
+            new MiningService(rcon), CreateBuildingMemory(), new GameCommandQueue());
+
+        var result = await tools.Smelt("iron-ore", "iron-plate", 2, "wood", 1, -19, -5);
+
+        Assert.Contains("\"status\":\"complete\"", result);
+        Assert.Contains("\"walk_status\":\"not_needed\"", result);
+        Assert.Contains("can_reach_entity", rcon.AllCommands[0]);
+        Assert.DoesNotContain(rcon.AllCommands, command => command.Contains("\"request_path\""));
+    }
+
+    [Fact]
     public async Task Smelt_WithExplicitFurnace_WalksInsertsAndCollects()
     {
         var rcon = new ScriptedRconClient([
+            """{"success":true,"can_reach":false}""",
             // 1. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 2. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 3. RequestPathAsync (returns request ID)
             """1""",
             // 4. GetPathResultAsync (path ready)
@@ -392,10 +474,9 @@ public class TaskToolsTests
         var rcon = new ScriptedRconClient([
             // 1. PathfindingService.GetPlayerPosition (FindFurnace → building memory search)
             """{"x":0,"y":0}""",
+            """{"success":true,"can_reach":false}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -438,10 +519,9 @@ public class TaskToolsTests
             """{"x":0,"y":0}""",
             // 2. FindNearestEntity("furnace") → found world entity
             """{"success":true,"entity":"steel-furnace","type":"furnace","x":10,"y":5,"distance":11.2,"total_found":1}""",
+            """{"success":true,"can_reach":false}""",
             // 3. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 4. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 5. RequestPathAsync (returns request ID)
             """1""",
             // 6. GetPathResultAsync (path ready)
@@ -502,10 +582,9 @@ public class TaskToolsTests
     public async Task Smelt_WalkStuck_ReturnsWalkFailed()
     {
         var rcon = new ScriptedRconClient([
+            """{"success":true,"can_reach":false}""",
             // 1. PathfindingService.GetPositionAsync (walk init for explicit furnace)
             """{"x":0,"y":0}""",
-            // 2. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 3. RequestPathAsync (returns request ID)
             """1""",
             // 4. GetPathResultAsync (no path found)
@@ -530,7 +609,7 @@ public class TaskToolsTests
     {
         var rcon = new ScriptedRconClient([
             // 1. PathfindingService.GetPositionAsync (walk init for explicit furnace — already near)
-            """{"x":4,"y":0}""",
+            """{"success":true,"can_reach":true,"x":4,"y":0,"distance":1}""",
             // 2. InsertItems ore → fails
             """{"success":false,"error":"no_entity_at_position"}"""
         ]);
@@ -553,7 +632,7 @@ public class TaskToolsTests
     {
         var rcon = new ScriptedRconClient([
             // 1. PathfindingService.GetPositionAsync (walk init for explicit furnace — already near)
-            """{"x":4,"y":0}""",
+            """{"success":true,"can_reach":true,"x":4,"y":0,"distance":1}""",
             // 2. InsertItems ore
             """{"success":true,"entity":"stone-furnace","item":"iron-ore","inserted":5,"requested":5}""",
             // 3. InsertItems fuel
@@ -584,7 +663,7 @@ public class TaskToolsTests
     {
         var rcon = new ScriptedRconClient([
             // 1. PathfindingService.GetPlayerPosition (walk init — already near)
-            """{"x":4,"y":0}""",
+            """{"success":true,"can_reach":true,"x":4,"y":0,"distance":1}""",
             // 2. InsertItems ore
             """{"success":true,"entity":"stone-furnace","item":"iron-ore","inserted":10,"requested":10}""",
             // 3. InsertItems fuel

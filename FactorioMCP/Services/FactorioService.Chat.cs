@@ -7,28 +7,30 @@ internal sealed partial class FactorioService
 {
     // ── Chat ─────────────────────────────────────────────────────────
 
+    public Task<string> GetBridgeStatusAsync(CancellationToken cancellationToken = default)
+    {
+        return rcon.ExecuteLuaAsync("""
+            if not remote.interfaces.factorio_mcp_bridge then
+                rcon.print('{"error":"Install and enable factorio-mcp-bridge 0.1.0 on the server and all clients, then reload the test save."}')
+                return
+            end
+            rcon.print(helpers.table_to_json(remote.call("factorio_mcp_bridge", "get_info")))
+            """, cancellationToken);
+    }
+
     /// <summary>
-    /// Register an <c>on_console_chat</c> event handler that stores incoming chat messages
-    /// in <c>storage.chat_log</c>. Idempotent — safe to call multiple times; the handler
-    /// is replaced and existing messages are preserved.
+    /// Initialize the persistent bridge session without registering scenario events.
+    /// Existing chat messages are preserved.
     /// </summary>
     public Task<string> InitializeChatListenerAsync(CancellationToken cancellationToken = default)
     {
         return rcon.ExecuteLuaAsync("""
-            storage.chat_log = storage.chat_log or {}
-            script.on_event(defines.events.on_console_chat, function(e)
-                local player_name = "server"
-                if e.player_index then
-                    local p = game.get_player(e.player_index)
-                    if p then player_name = p.name end
-                end
-                table.insert(storage.chat_log, {
-                    tick = e.tick,
-                    player_name = player_name,
-                    message = e.message
-                })
-            end)
-            rcon.print('{"status":"initialized","existing_messages":'..#storage.chat_log..'}')
+            if not remote.interfaces.factorio_mcp_bridge then
+                rcon.print('{"error":"Install and enable factorio-mcp-bridge 0.1.0 on the server and all clients, then reload the test save."}')
+                return
+            end
+            local result = remote.call("factorio_mcp_bridge", "initialize")
+            rcon.print(helpers.table_to_json(result))
             """, cancellationToken);
     }
 
@@ -41,7 +43,7 @@ internal sealed partial class FactorioService
         ArgumentOutOfRangeException.ThrowIfNegative(sinceTick);
 
         var lua = string.Create(CultureInfo.InvariantCulture, $$"""
-            local log = storage.chat_log or {}
+            local log = remote.call("factorio_mcp_bridge", "get_chat_log")
             local since_tick = {{sinceTick}}
             local json_escape = function(s)
                 return s:gsub('\\', '\\\\'):gsub('"', '\\"'):gsub('\n', '\\n'):gsub('\r', '\\r')

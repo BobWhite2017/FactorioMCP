@@ -82,6 +82,7 @@ internal sealed class EntityTools(FactorioService factorio, MiningService mining
         "one unit at a time using normal game mechanics — no instant extraction. " +
         "Specify how many units to mine and the tool will start mining, wait for the specified amount " +
         "to be extracted, then stop. Returns the actual number mined. " +
+        "Requires proximity within the character's resource mining reach; does not walk. Use GatherResource to approach first. " +
         "Use this for mining iron-ore, copper-ore, stone, coal, and other resource entities. " +
         "For mining buildings (furnaces, drills, belts, etc.), use MineEntity instead.")]
     public Task<string> MineResource(

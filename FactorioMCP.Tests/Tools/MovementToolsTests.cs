@@ -51,8 +51,6 @@ public class MovementToolsTests
         var rcon = new ScriptedRconClient([
             // 1. GetPositionAsync (initial check — far from target)
             """{"x":0,"y":0}""",
-            // 2. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 3. RequestPathAsync
             """1""",
             // 4. GetPathResultAsync (path ready with waypoints)
@@ -81,8 +79,6 @@ public class MovementToolsTests
         var rcon = new ScriptedRconClient([
             // 1. GetPositionAsync (initial check)
             """{"x":0,"y":0}""",
-            // 2. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 3. RequestPathAsync
             """1""",
             // 4. GetPathResultAsync (no path found)

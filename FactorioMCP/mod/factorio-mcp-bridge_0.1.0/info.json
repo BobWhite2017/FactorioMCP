@@ -1,0 +1,9 @@
+{
+  "name": "factorio-mcp-bridge",
+  "version": "0.1.0",
+  "title": "Factorio MCP Bridge",
+  "author": "FactorioMCP contributors",
+  "factorio_version": "2.1",
+  "dependencies": ["base >= 2.1.0"],
+  "description": "Persistent chat, movement, mining and pathfinding event handlers for FactorioMCP."
+}

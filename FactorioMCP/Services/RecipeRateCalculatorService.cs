@@ -38,7 +38,7 @@ internal sealed class RecipeRateCalculatorService(RconClient rcon)
                 return
             end
             local energy = r.energy
-            local cat = r.category
+            local cat = r.categories[1]
             {{machineClause}}
             local machine_name = machine_override
             local crafting_speed = 1.0

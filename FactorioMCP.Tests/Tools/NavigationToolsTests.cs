@@ -22,8 +22,6 @@ public class NavigationToolsTests
             """{"success":true,"entity":"stone-furnace","type":"furnace","x":20,"y":0,"distance":20.0,"total_found":3}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -103,8 +101,6 @@ public class NavigationToolsTests
             """{"success":true,"entity":"stone-furnace","type":"furnace","x":50,"y":0,"distance":50.0,"total_found":1}""",
             // 2. GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (no path)
@@ -132,8 +128,6 @@ public class NavigationToolsTests
             """{"success":true,"resource":"iron-ore","best_patch":{"center_x":30.0,"center_y":10.0,"count":50,"total_amount":10000,"distance":31.6},"total_entities":50,"total_patches":2,"alternatives":[]}""",
             // 2. GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -191,8 +185,6 @@ public class NavigationToolsTests
             """{"x":0,"y":0}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -231,8 +223,6 @@ public class NavigationToolsTests
             """{"x":0,"y":0}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready)
@@ -291,8 +281,6 @@ public class NavigationToolsTests
             """{"x":0,"y":0}""",
             // 2. PathfindingService.GetPositionAsync (walk init)
             """{"x":0,"y":0}""",
-            // 3. EnsurePathHandlerInstalledAsync
-            """ok""",
             // 4. RequestPathAsync (returns request ID)
             """1""",
             // 5. GetPathResultAsync (path ready - needs 2+ waypoints for DrawPathAsync to execute)

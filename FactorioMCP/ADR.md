@@ -6,7 +6,7 @@ Key design decisions for the FactorioMCP project.
 
 ## ADR-001: RCON Over Mod API
 
-**Decision:** Use RCON + Lua commands instead of a custom Factorio mod.
+**Decision:** Use RCON + Lua commands for ordinary operations, with a small persistent bridge mod for event-dependent behavior.
 
 **Context:** Factorio supports two extensibility mechanisms:
 1. **RCON** — Remote Console protocol over TCP, executes Lua snippets via `/silent-command`
@@ -23,7 +23,25 @@ Key design decisions for the FactorioMCP project.
 - RCON command execution is synchronous from the caller's perspective
 - Some advanced features (pathfinding callbacks, async crafting notifications) would be easier with a mod
 
-**Status:** Accepted. A companion mod is ON HOLD as a future option if polling proves too limited.
+**Status:** Amended for Factorio 2.1 lifecycle compatibility. Dynamically
+registering `on_console_chat`, `on_tick`, and
+`on_script_path_request_finished` through scenario RCON commands broke
+multiplayer map loading with `multiplayer.script-event-mismatch`. Lua
+functions are not serialized, and joining clients only execute `control.lua`
+and `on_load`, so changing MCP startup order cannot fix later rejoins.
+
+The required `factorio-mcp-bridge` mod unconditionally registers these three
+handlers in `control.lua`. Its remote API owns chat history, walking/mining
+command state and path requests/results in mod-local storage. Other operations
+remain direct RCON commands. There is no dynamic scenario-handler fallback.
+Both server and clients must enable the matching bridge version, and startup
+checks bridge API compatibility explicitly. No storage is written while
+`control.lua` loads or during `on_load`; initialization uses `on_init` and
+`on_configuration_changed`.
+
+References:
+- https://lua-api.factorio.com/latest/auxiliary/data-lifecycle.html
+- https://lua-api.factorio.com/latest/auxiliary/storage.html
 
 ---
 

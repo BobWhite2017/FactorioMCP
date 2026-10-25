@@ -6,8 +6,7 @@ namespace FactorioMCP.Tools;
 
 /// <summary>
 /// MCP tools for reading and sending in-game chat messages.
-/// Uses an on_console_chat event handler registered via RCON to capture messages
-/// in storage.chat_log, and game.print() to send messages to all players.
+/// Uses the persistent bridge's chat log, and game.print() to send messages to all players.
 /// </summary>
 [McpServerToolType]
 internal sealed class ChatTools(FactorioService factorio, GameCommandQueue queue)
@@ -16,7 +15,7 @@ internal sealed class ChatTools(FactorioService factorio, GameCommandQueue queue
         "Get chat messages from the in-game chat log. Returns messages sent by players " +
         "(not commands). Use the 'sinceTick' parameter to only get new messages since " +
         "the last poll — pass the 'latest_tick' value from the previous response. " +
-        "The chat listener must be initialized first (done automatically on startup).")]
+        "Requires the persistent bridge mod (checked automatically on startup).")]
     public Task<string> GetChatMessages(
         [Description("Only return messages after this game tick. Pass 0 to get all messages, " +
             "or pass the 'latest_tick' from a previous GetChatMessages response to get only new ones.")]

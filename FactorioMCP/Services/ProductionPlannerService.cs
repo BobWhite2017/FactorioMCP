@@ -120,7 +120,7 @@ internal sealed class ProductionPlannerService(RconClient rcon)
                 end
                 visited[item_name] = true
                 local energy = recipe.energy
-                local cat = recipe.category
+                local cat = recipe.categories[1]
                 local machine_name = get_machine(cat)
                 local speed = get_speed(machine_name)
                 local eff_time = energy / speed

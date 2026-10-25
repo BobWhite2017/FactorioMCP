@@ -6,6 +6,40 @@ namespace FactorioMCP.Tests.Services;
 public partial class FactorioServiceTests
 {
     [Fact]
+    public async Task RecipeQueries_UseFactorio21CategoryArray()
+    {
+        await _service.GetRecipeDetailsAsync("lab");
+        await _service.GetAvailableRecipesAsync();
+        await new RecipeRateCalculatorService(_rcon).CalculateProductionRateAsync("lab", 1);
+        await new ProductionPlannerService(_rcon).PlanProductionAsync("lab", 1);
+
+        Assert.All(_rcon.AllCommands, command =>
+        {
+            Assert.Contains(".categories[1]", command);
+            Assert.DoesNotMatch(@"\b(recipe|r)\.category\b", command);
+        });
+    }
+
+    [Fact]
+    public async Task TechnologyQueries_IncludeOptionalTriggerWithoutReplacingNormalCostFields()
+    {
+        await _service.GetAvailableTechnologiesAsync();
+        await _service.GetTechnologyDetailsAsync("steam-power");
+
+        Assert.All(_rcon.AllCommands, command =>
+        {
+            Assert.Contains("tech.prototype.research_trigger", command);
+            Assert.Contains("helpers.table_to_json(trigger)", command);
+            Assert.Contains("trigger and", command);
+            Assert.Contains("\"research_trigger\":", command);
+            Assert.Contains("tech.research_unit_count", command);
+            Assert.Contains("tech.research_unit_ingredients", command);
+        });
+        Assert.Contains("\"error\":\"unknown_technology\"", _rcon.LastCommand!);
+        Assert.Contains("if not tech then", _rcon.LastCommand!);
+    }
+
+    [Fact]
     public async Task ResearchCommands_GenerateCorrectLua()
     {
         // GetResearchStatusAsync
@@ -44,7 +78,7 @@ public partial class FactorioServiceTests
         Assert.Contains("recipe.ingredients", detailCmd);
         Assert.Contains("recipe.products", detailCmd);
         Assert.Contains("recipe.energy", detailCmd);
-        Assert.Contains("recipe.category", detailCmd);
+        Assert.Contains("recipe.categories[1]", detailCmd);
 
         // GetAvailableRecipesAsync
         await _service.GetAvailableRecipesAsync();

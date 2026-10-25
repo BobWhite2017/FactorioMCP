@@ -20,6 +20,22 @@ Walk to a target using Factorio's built-in A* pathfinder. Navigates around build
 
 **Returns:** `{ "status": "arrived"|"stuck"|"timeout"|"no_path", "x", "y", "distance" }`
 
+`no_path` means the pathfinder explicitly rejected the route. A request still
+pending at the operation deadline returns `timeout`, not `no_path`. Stationary
+walking requires at least 180 advancing simulation ticks before it is classified
+as `stuck`; a paused or delayed simulation can instead reach the wall-clock
+timeout. Walking failures and pending-path timeouts include `phase` and
+`diagnostics` (tick, game speed, player/surface indices, position and walking
+state) to distinguish simulation delays and input interruption from obstacles.
+Use only one controlling MCP client per endpoint. Startup's local-user endpoint
+lease rejects a second controller before bridge initialization. Older builds,
+external RCON clients and controllers on other machines remain outside this
+safeguard; their commands can still interfere with shared bridge controls.
+
+Arrival requires the actual player-to-target distance to meet `tolerance`;
+passing the last path waypoint by projection alone is not arrival. Walking
+clears bridge control in `finally` on completion, cancellation, or errors.
+
 ---
 
 ### `GetPlayerPosition`
@@ -167,7 +183,18 @@ Mine resource patches (ore, stone, coal) with realistic one-unit-at-a-time timin
 | `pollIntervalSeconds` | `double` | `0.5` | Check interval |
 | `timeoutSeconds` | `double` | `60` | Max wait |
 
-**Returns:** `{ "success": true, "status": "complete"|"depleted"|"timeout", "entity", "mined", "requested", "remaining", "depleted" }`
+**Returns:** `{ "success": true, "status": "complete"|"depleted"|"timeout"|"interrupted", "entity", "mined", "requested", "remaining", "depleted", "stopped", "error" }`
+
+Resource mining checks `resource_reach_distance`, not the longer
+inventory-interaction `reach_distance`, against the selected resource entity.
+This atomic tool does not walk: use `GatherResource` to approach and mine.
+Mining always clears its bridge command on cancellation, timeout or parsing
+errors. Results include `stopped:true` only after cleanup succeeds; an
+unsuccessful restart returns `status:"interrupted"` and the underlying `error`.
+Transport cancellation must reach the server for immediate cleanup. A client
+that silently abandons a request without cancellation leaves it running until
+its configured timeout; a killed process or lost RCON connection cannot
+guarantee cleanup of already issued game commands.
 
 ---
 
@@ -243,6 +270,13 @@ Auto-place an entity near a target position. Searches outward in a spiral for th
 ---
 
 ## Entity Interaction
+
+On Factorio 2.1, legacy `furnace_source` and `assembling_machine_input` aliases
+resolve to `crafter_input`; `furnace_result` and `assembling_machine_output`
+resolve to `crafter_output`. The same resolution is used by insert/remove,
+transfer/read, inventory waits, inspection and smelting. Native inventory names
+such as `fuel`, `chest`, `lab_input`, `crafter_input` and `crafter_output` are
+also accepted where that entity provides the requested inventory.
 
 ### `InsertItems`
 Insert items from player inventory into a machine. Used to fuel drills, load furnaces with ore, or stock assemblers.
@@ -450,6 +484,12 @@ Find a tracked building by label or entity name and walk to it. Searches buildin
 ### `GatherResource`
 Find a resource patch → walk → find nearest entity → mine. All in one call. Uses realistic tick-based mining.
 
+After reaching the patch, approaches the actual selected resource to within
+0.5 tiles before starting mining, which still validates the character's normal
+resource reach. A missing resource is an explicit error rather than a guessed
+patch-center mining attempt. Approach and mining share the total operation
+deadline; no extra mining budget is granted after walking.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `resource` | `string` | required | e.g. `iron-ore`, `coal` |
@@ -477,20 +517,30 @@ Walk to an entity and insert fuel — in one call.
 ---
 
 ### `Smelt`
+
+Checks the selected furnace with `player.can_reach_entity` before walking.
+If it is already legally reachable, smelting starts without trying to path to
+the furnace's center. Item insert/remove operations also enforce this game
+reach predicate; no reach distances are extended.
 Find a furnace → walk → insert ore + fuel → wait for smelting → collect output. All in one call. Searches building memory first, falls back to world entity search.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `ore` | `string` | required | e.g. `iron-ore` |
 | `outputItem` | `string` | required | e.g. `iron-plate` |
-| `count` | `int` | `10` | Ore to insert |
+| `count` | `int` | `10` | Ore to insert; must be positive |
 | `fuel` | `string` | `"coal"` | |
-| `fuelCount` | `int` | `5` | |
+| `fuelCount` | `int` | `5` | Nonnegative; `0` skips refueling and uses the furnace's existing fuel or power |
 | `furnaceX` | `double?` | auto-find | Optional specific furnace X |
 | `furnaceY` | `double?` | auto-find | Optional specific furnace Y |
 | `timeoutSeconds` | `double` | `180` | Total timeout |
 
 **Returns:** `{ "success", "operation": "smelt", "ore_inserted", "fuel_inserted", "output_collected", "status", ... }`
+
+Invalid counts return `invalid_count` before any game commands or item transfers.
+With `fuelCount=0`, `fuel_inserted` is `0`; the furnace still needs sufficient
+existing fuel or power to smelt, otherwise the operation can time out. No fuel is
+created and the default remains five coal.
 
 ---
 
@@ -581,6 +631,11 @@ List technologies with prerequisites met and not yet researched.
 
 **Returns:** `{ "technologies": [{ "name", "cost", "ingredients": [{ "name", "count" }] }], "count" }`
 
+Trigger-based technologies also include `research_trigger`, preserving the game's
+trigger data, for example `{ "type": "craft-item", "item": { "name": "iron-plate" }, "count": 50 }`.
+The normal cost/ingredient fields are retained; an empty science ingredient list
+does not mean a trigger-based technology is free.
+
 ---
 
 ### `StartResearch`
@@ -599,6 +654,9 @@ Queue a technology for research.
 ### `GetRecipeDetails`
 Get ingredients, products, crafting time, and category for a recipe.
 
+The `category` field reports the first entry of Factorio 2.1's `categories`
+array, preserving the existing response shape.
+
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `recipe` | `string` | e.g. `iron-gear-wheel` |
@@ -612,6 +670,10 @@ List all unlocked recipes with name, category, and crafting time.
 
 ### `GetTechnologyDetails`
 Get prerequisites, effects (recipe unlocks), cost, and science pack requirements for a technology.
+
+Includes optional `research_trigger` data for trigger-based technologies, in
+addition to the normal cost and science ingredients. Unknown technologies still
+return `unknown_technology`; no substitute technology is queried.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

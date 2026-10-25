@@ -614,12 +614,11 @@ internal sealed partial class FactorioService
             local player_count = player.get_item_count(item)
             local container_total = 0
             local containers = {}
+            {{LuaInventoryTypes}}
             local inv_types = {
                 {defines.inventory.chest, "chest"},
-                {defines.inventory.furnace_source, "furnace_source"},
-                {defines.inventory.furnace_result, "furnace_result"},
-                {defines.inventory.assembling_machine_input, "assembling_machine_input"},
-                {defines.inventory.assembling_machine_output, "assembling_machine_output"}
+                {inventory_type("furnace_source"), "furnace_source"},
+                {inventory_type("furnace_result"), "furnace_result"}
             }
             local entities = player.surface.find_entities_filtered{
                 position=player.position, radius={{radius}}

@@ -12,13 +12,16 @@ internal sealed class ScriptedMiningRconClient : RconClient
 {
     private readonly Queue<string> _responses = new();
     public List<string> AllCommands { get; } = [];
+    public Func<string, string>? Respond { get; init; }
 
     public void EnqueueResponse(string response) => _responses.Enqueue(response);
 
     public override Task<string> ExecuteAsync(string command, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         AllCommands.Add(command);
-        var response = _responses.Count > 0 ? _responses.Dequeue() : string.Empty;
+        var response = Respond is not null ? Respond(command)
+            : _responses.Count > 0 ? _responses.Dequeue() : string.Empty;
         return Task.FromResult(response);
     }
 }
@@ -80,42 +83,39 @@ public class MiningServiceTests
     }
 
     [Fact]
-    public async Task StartMiningResource_StoresMineStateInStorage()
+    public async Task StartMiningResource_StoresMineStateInBridge()
     {
         await _service.StartMiningResourceAsync(5, 5);
 
-        Assert.Contains("storage.mine_state", _rcon.LastCommand!);
+        Assert.Contains("""remote.call("factorio_mcp_bridge", "set_mining", epos)""", _rcon.LastCommand!);
     }
 
     [Fact]
-    public async Task StartMiningResource_InstallsOnTickHandler()
+    public async Task StartMiningResource_DoesNotInstallLevelOnTickHandler()
     {
         await _service.StartMiningResourceAsync(5, 5);
 
-        Assert.Contains("script.on_event(defines.events.on_tick", _rcon.LastCommand!);
-        Assert.Contains("storage.mine_state", _rcon.LastCommand!);
+        Assert.DoesNotContain("script.on_event", _rcon.LastCommand!);
+        Assert.Contains("set_mining", _rcon.LastCommand!);
     }
 
     [Fact]
-    public async Task StartMiningResource_OnTickHandlerOnlyChecksMineState()
+    public async Task StartMiningResource_DoesNotUseScenarioStorage()
     {
         await _service.StartMiningResourceAsync(5, 5);
 
-        // The mining on_tick handler only handles mining (not walking - that's separate now)
-        Assert.Contains("storage.mine_state", _rcon.LastCommand!);
+        Assert.DoesNotContain("storage.", _rcon.LastCommand!);
     }
 
     [Fact]
-    public async Task StartMiningResource_OnTickHandlerSelectsEntityBeforeMining()
+    public async Task StartMiningResource_SelectsEntityBeforeMining()
     {
         await _service.StartMiningResourceAsync(5, 5);
 
-        // update_selected_entity must be called before mining_state in the on_tick handler
-        // so the player has a selected entity to mine
         Assert.Contains("update_selected_entity", _rcon.LastCommand!);
-        int selectIdx = _rcon.LastCommand!.IndexOf("update_selected_entity(storage.mine_state.position)");
-        int miningIdx = _rcon.LastCommand.IndexOf("p.mining_state = {mining = true");
-        Assert.True(selectIdx < miningIdx, "update_selected_entity must come before mining_state in on_tick handler");
+        int selectIdx = _rcon.LastCommand!.IndexOf("player.update_selected_entity(epos)");
+        int miningIdx = _rcon.LastCommand.IndexOf("player.mining_state = {mining = true");
+        Assert.True(selectIdx >= 0 && selectIdx < miningIdx);
     }
 
     [Fact]
@@ -181,11 +181,11 @@ public class MiningServiceTests
     }
 
     [Fact]
-    public async Task StopMining_ClearsMineStateInStorage()
+    public async Task StopMining_ClearsMineStateInBridge()
     {
         await _service.StopMiningAsync();
 
-        Assert.Contains("storage.mine_state = nil", _rcon.LastCommand!);
+        Assert.Contains("""remote.call("factorio_mcp_bridge", "set_mining", nil)""", _rcon.LastCommand!);
     }
 
     [Fact]
@@ -193,9 +193,8 @@ public class MiningServiceTests
     {
         await _service.StopMiningAsync();
 
-        // on_tick handler should NOT be removed — it's shared with PathfindingService
-        Assert.Contains("storage.mine_state = nil", _rcon.LastCommand!);
-        Assert.DoesNotContain("script.on_event(defines.events.on_tick, nil)", _rcon.LastCommand!);
+        Assert.Contains("set_mining", _rcon.LastCommand!);
+        Assert.DoesNotContain("script.on_event", _rcon.LastCommand!);
     }
 
     [Fact]
@@ -207,6 +206,102 @@ public class MiningServiceTests
     }
 
     // ── MineResourceAsync ────────────────────────────────────────────
+
+    [Fact]
+    public async Task MineResource_FailedRestartReportsInterruptionAndStops()
+    {
+        var rcon = new ScriptedMiningRconClient();
+        rcon.EnqueueResponse("""{"success":true,"entity":"iron-ore","amount":100}""");
+        rcon.EnqueueResponse("""{"is_mining":false,"depleted":false,"remaining":99,"mined":1}""");
+        rcon.EnqueueResponse("""{"success":false,"error":"out_of_range"}""");
+        rcon.EnqueueResponse("""{"success":true,"status":"mining_stopped"}""");
+
+        var result = await new MiningService(rcon).MineResourceAsync(5, 5, 2,
+            TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(1));
+
+        Assert.Contains("\"status\":\"interrupted\"", result);
+        Assert.Contains("\"error\":\"out_of_range\"", result);
+        Assert.Contains("\"mined\":1", result);
+        Assert.Contains("\"stopped\":true", result);
+        Assert.Contains("mining = false", rcon.AllCommands[^1]);
+    }
+
+    [Fact]
+    public async Task MineResource_LongPollIntervalIsBoundedByTimeout()
+    {
+        var rcon = new ScriptedMiningRconClient
+        {
+            Respond = command => command.Contains("mining = false")
+                ? """{"success":true,"status":"mining_stopped"}"""
+                : command.Contains("local is_mining")
+                    ? """{"is_mining":true,"depleted":false,"remaining":100,"mined":0}"""
+                    : """{"success":true,"entity":"iron-ore","amount":100}"""
+        };
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+
+        var result = await new MiningService(rcon).MineResourceAsync(5, 5, 1,
+            TimeSpan.FromSeconds(10), TimeSpan.FromMilliseconds(20));
+
+        Assert.Contains("\"status\":\"timeout\"", result);
+        Assert.Contains("\"stopped\":true", result);
+        Assert.True(elapsed.Elapsed < TimeSpan.FromSeconds(1));
+        Assert.Contains("mining = false", rcon.AllCommands[^1]);
+    }
+
+    [Fact]
+    public async Task MineResource_FailedStopIsNotReportedAsStoppedSuccess()
+    {
+        var rcon = new ScriptedMiningRconClient();
+        rcon.EnqueueResponse("""{"success":true,"entity":"iron-ore","amount":100}""");
+        rcon.EnqueueResponse("""{"is_mining":true,"depleted":false,"remaining":99,"mined":1}""");
+        rcon.EnqueueResponse("""{"success":false,"error":"stop_failed"}""");
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new MiningService(rcon).MineResourceAsync(5, 5, 1,
+                TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(1)));
+
+        Assert.Contains("may still be active", error.Message);
+    }
+
+    [Fact]
+    public async Task StartMiningResource_UsesResourceReachNotInteractionReach()
+    {
+        await _service.StartMiningResourceAsync(5, 5);
+
+        Assert.Contains("player.resource_reach_distance", _rcon.LastCommand!);
+        Assert.DoesNotContain("player.reach_distance", _rcon.LastCommand!);
+    }
+
+    [Fact]
+    public async Task MineResource_CancellationStopsMiningWithUncancelledToken()
+    {
+        var rcon = new ScriptedMiningRconClient();
+        rcon.EnqueueResponse("""{"success":true,"entity":"iron-ore","amount":100}""");
+        rcon.EnqueueResponse("""{"success":true,"status":"mining_stopped"}""");
+        using var cancellation = new CancellationTokenSource();
+        var service = new MiningService(rcon);
+        var operation = service.MineResourceAsync(5, 5, 1, TimeSpan.FromSeconds(10),
+            TimeSpan.FromSeconds(20), cancellation.Token);
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => operation);
+        Assert.Contains("mining = false", rcon.AllCommands[^1]);
+    }
+
+    [Fact]
+    public async Task MineResource_InvalidStatusStillStopsMining()
+    {
+        var rcon = new ScriptedMiningRconClient();
+        rcon.EnqueueResponse("""{"success":true,"entity":"iron-ore","amount":100}""");
+        rcon.EnqueueResponse("invalid JSON");
+        rcon.EnqueueResponse("""{"success":true,"status":"mining_stopped"}""");
+
+        await Assert.ThrowsAnyAsync<System.Text.Json.JsonException>(() =>
+            new MiningService(rcon).MineResourceAsync(5, 5, 1,
+                TimeSpan.FromMilliseconds(1), TimeSpan.FromSeconds(1)));
+
+        Assert.Contains("mining = false", rcon.AllCommands[^1]);
+    }
 
     [Fact]
     public async Task MineResource_RejectsZeroCount()

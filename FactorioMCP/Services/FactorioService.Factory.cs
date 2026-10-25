@@ -98,6 +98,7 @@ internal sealed partial class FactorioService
             for k, v in pairs(defines.entity_status) do status_names[v] = k end
             local status_name = e.status and status_names[e.status] or "unknown"
             local missing = {}
+            {{LuaInventoryTypes}}
             -- Check fuel
             local fuel_inv = e.get_inventory(defines.inventory.fuel)
             if fuel_inv and #fuel_inv > 0 then
@@ -111,7 +112,7 @@ internal sealed partial class FactorioService
                 end
             end
             -- Check furnace source
-            local src_inv = e.get_inventory(defines.inventory.furnace_source)
+            local src_inv = e.type == "furnace" and e.get_inventory(inventory_type("furnace_source"))
             if src_inv and #src_inv > 0 then
                 local has_source = false
                 for i = 1, #src_inv do
@@ -125,7 +126,7 @@ internal sealed partial class FactorioService
             -- Check assembler inputs against recipe
             local recipe = e.get_recipe()
             if recipe then
-                local input_inv = e.get_inventory(defines.inventory.assembling_machine_input)
+                local input_inv = e.get_inventory(inventory_type("assembling_machine_input"))
                 if input_inv then
                     for _, ingredient in pairs(recipe.ingredients) do
                         local have = input_inv.get_item_count(ingredient.name)
@@ -136,7 +137,7 @@ internal sealed partial class FactorioService
                 end
             end
             -- Check output full
-            local out_inv = e.get_inventory(defines.inventory.furnace_result) or e.get_inventory(defines.inventory.assembling_machine_output)
+            local out_inv = e.get_inventory(inventory_type("furnace_result"))
             if out_inv then
                 local all_full = true
                 for i = 1, #out_inv do

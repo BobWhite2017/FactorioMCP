@@ -46,7 +46,9 @@ internal sealed partial class FactorioService
                         for _, ing in pairs(tech.research_unit_ingredients) do
                             ings[#ings+1] = '{"name":"'..esc(ing.name)..'","count":'..ing.amount..'}'
                         end
-                        parts[#parts+1] = '{"name":"'..esc(name)..'","cost":'..tech.research_unit_count..',"ingredients":['..table.concat(ings, ",")..']}'
+                        local trigger = tech.prototype.research_trigger
+                        local trigger_json = trigger and ',"research_trigger":'..helpers.table_to_json(trigger) or ""
+                        parts[#parts+1] = '{"name":"'..esc(name)..'","cost":'..tech.research_unit_count..',"ingredients":['..table.concat(ings, ",")..']'..trigger_json..'}'
                     end
                 end
             end
@@ -116,7 +118,7 @@ internal sealed partial class FactorioService
                 local prob = p.probability or 1
                 prods[#prods+1] = '{"type":"'..esc(p.type)..'","name":"'..esc(p.name)..'","amount":'..amt..',"probability":'..prob..'}'
             end
-            rcon.print('{"success":true,"name":"'..esc(recipe.name)..'","enabled":'..tostring(recipe.enabled)..',"energy":'..recipe.energy..',"category":"'..esc(recipe.category)..'","ingredients":['..table.concat(ings, ",")..'],"products":['..table.concat(prods, ",")..']}')
+            rcon.print('{"success":true,"name":"'..esc(recipe.name)..'","enabled":'..tostring(recipe.enabled)..',"energy":'..recipe.energy..',"category":"'..esc(recipe.categories[1])..'","ingredients":['..table.concat(ings, ",")..'],"products":['..table.concat(prods, ",")..']}')
             """;
 
         return rcon.ExecuteLuaAsync(lua, cancellationToken);
@@ -134,7 +136,7 @@ internal sealed partial class FactorioService
             local parts = {}
             for name, recipe in pairs(force.recipes) do
                 if recipe.enabled then
-                    parts[#parts+1] = '{"name":"'..esc(name)..'","category":"'..esc(recipe.category)..'","energy":'..recipe.energy..'}'
+                    parts[#parts+1] = '{"name":"'..esc(name)..'","category":"'..esc(recipe.categories[1])..'","energy":'..recipe.energy..'}'
                 end
             end
             rcon.print('{"recipes":['..table.concat(parts, ",")..'],"count":'..#parts..'}')
@@ -172,7 +174,9 @@ internal sealed partial class FactorioService
             for _, ing in pairs(tech.research_unit_ingredients) do
                 ings[#ings+1] = '{"name":"'..esc(ing.name)..'","count":'..ing.amount..'}'
             end
-            rcon.print('{"success":true,"name":"'..esc(tech.name)..'","researched":'..tostring(tech.researched)..',"enabled":'..tostring(tech.enabled)..',"cost":'..tech.research_unit_count..',"prerequisites":['..table.concat(prereqs, ",")..'],"effects":['..table.concat(effects, ",")..'],"ingredients":['..table.concat(ings, ",")..']}')
+            local trigger = tech.prototype.research_trigger
+            local trigger_json = trigger and ',"research_trigger":'..helpers.table_to_json(trigger) or ""
+            rcon.print('{"success":true,"name":"'..esc(tech.name)..'","researched":'..tostring(tech.researched)..',"enabled":'..tostring(tech.enabled)..',"cost":'..tech.research_unit_count..',"prerequisites":['..table.concat(prereqs, ",")..'],"effects":['..table.concat(effects, ",")..'],"ingredients":['..table.concat(ings, ",")..']'..trigger_json..'}')
             """;
 
         return rcon.ExecuteLuaAsync(lua, cancellationToken);

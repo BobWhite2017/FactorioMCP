@@ -39,7 +39,11 @@ internal sealed class TaskTools(
     {
         return queue.ExecuteAsync(nameof(GatherResource), async ct =>
         {
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(timeoutSeconds, 1));
+            if (count <= 0)
+                return FormatError("gather", resource, "invalid_count", "count must be greater than zero");
+            if (!double.IsFinite(timeoutSeconds) || timeoutSeconds <= 0)
+                return FormatError("gather", resource, "invalid_timeout", "timeoutSeconds must be positive and finite");
+            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(timeoutSeconds);
 
             // Step 1: Find the best resource patch
             var patchJson = await factorio.FindBestResourcePatchAsync(resource, searchRadius, ct);
@@ -57,11 +61,13 @@ internal sealed class TaskTools(
             var patchY = patch.GetProperty("center_y").GetDouble();
 
             // Step 2: Walk to the patch center
-            var walkTimeout = Math.Max(RemainingSeconds(deadline), 1);
+            var walkTimeout = RemainingSeconds(deadline);
+            if (walkTimeout <= 0)
+                return FormatError("gather", resource, "timeout", "Deadline reached before approaching the patch");
             var walkJson = await pathfinding.WalkToAsync(patchX, patchY, 3.0, walkTimeout, ct);
             var walk = ParseWalkResult(walkJson);
 
-            if (walk.Status is "stuck" or "timeout" or "no_path")
+            if (walk.Status != "arrived")
             {
                 return FormatGatherResult(resource, count, 0, patchX, patchY, walk, "walk_failed");
             }
@@ -79,13 +85,21 @@ internal sealed class TaskTools(
             }
             else
             {
-                // Fall back to patch center if no entity found nearby
-                entityX = patchX;
-                entityY = patchY;
+                return FormatError("gather", resource, "no_resource", "No resource entity found near the patch");
             }
 
+            var approachTimeout = RemainingSeconds(deadline);
+            if (approachTimeout <= 0)
+                return FormatError("gather", resource, "timeout", "Deadline reached before approaching the resource");
+            var approachJson = await pathfinding.WalkToAsync(entityX, entityY, 0.5, approachTimeout, ct);
+            walk = ParseWalkResult(approachJson);
+            if (walk.Status != "arrived")
+                return FormatGatherResult(resource, count, 0, entityX, entityY, walk, "walk_failed");
+
             // Step 4: Mine the resource
-            var mineTimeout = Math.Max(RemainingSeconds(deadline), 1);
+            var mineTimeout = RemainingSeconds(deadline);
+            if (mineTimeout <= 0)
+                return FormatError("gather", resource, "timeout", "Deadline reached before mining");
             var mineResult = await mining.MineResourceAsync(
                 entityX, entityY, count,
                 TimeSpan.FromSeconds(0.5),
@@ -191,7 +205,7 @@ internal sealed class TaskTools(
         int count = 10,
         [Description("Fuel item name (default 'coal')")]
         string fuel = "coal",
-        [Description("Number of fuel items to insert (default 5). Ensure enough fuel for the smelting duration.")]
+        [Description("Number of fuel items to insert (default 5); 0 skips refueling and uses existing fuel or power. Must be nonnegative.")]
         int fuelCount = 5,
         [Description("Optional: X coordinate of a specific furnace to use. If omitted, searches for the nearest furnace.")]
         double? furnaceX = null,
@@ -203,6 +217,10 @@ internal sealed class TaskTools(
     {
         return queue.ExecuteAsync(nameof(Smelt), async ct =>
         {
+            if (count <= 0 || fuelCount < 0)
+                return FormatError("smelt", ore, "invalid_count",
+                    "count must be greater than zero and fuelCount must be nonnegative; use fuelCount=0 to skip refueling");
+
             var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(Math.Max(timeoutSeconds, 1));
             double targetX, targetY;
             string furnaceName;
@@ -227,10 +245,25 @@ internal sealed class TaskTools(
                 furnaceName = name;
             }
 
-            // Step 2: Walk to the furnace
-            var walkTimeout = Math.Max(RemainingSeconds(deadline), 1);
-            var walkJson = await pathfinding.WalkToAsync(targetX, targetY, 2.0, walkTimeout, ct);
-            var walk = ParseWalkResult(walkJson);
+            // Step 2: Walk only if the selected furnace is not legally reachable.
+            var reachJson = await factorio.GetEntityReachAsync(targetX, targetY, ct);
+            using var reachDoc = JsonDocument.Parse(reachJson);
+            var reach = reachDoc.RootElement;
+            if (!reach.GetProperty("success").GetBoolean())
+                return FormatError("smelt", ore, reach.GetProperty("error").GetString()!, "Cannot reach the selected furnace");
+
+            WalkResult walk;
+            if (reach.GetProperty("can_reach").GetBoolean())
+            {
+                walk = new WalkResult("not_needed", reach.GetProperty("x").GetDouble(),
+                    reach.GetProperty("y").GetDouble(), reach.GetProperty("distance").GetDouble());
+            }
+            else
+            {
+                var walkTimeout = Math.Max(RemainingSeconds(deadline), 1);
+                var walkJson = await pathfinding.WalkToAsync(targetX, targetY, 2.0, walkTimeout, ct);
+                walk = ParseWalkResult(walkJson);
+            }
 
             if (walk.Status is "stuck" or "timeout" or "no_path")
             {
@@ -250,8 +283,12 @@ internal sealed class TaskTools(
             }
 
             // Step 4: Insert fuel
-            var fuelResult = await factorio.InsertItemsAsync(targetX, targetY, fuel, fuelCount, "fuel", ct);
-            var fuelInserted = ParseInsertedCount(fuelResult);
+            var fuelInserted = 0;
+            if (fuelCount > 0)
+            {
+                var fuelResult = await factorio.InsertItemsAsync(targetX, targetY, fuel, fuelCount, "fuel", ct);
+                fuelInserted = ParseInsertedCount(fuelResult);
+            }
 
             // Step 5: Wait for smelting to complete (poll until source is empty)
             var waitTimeout = Math.Max(RemainingSeconds(deadline), 1);
@@ -371,8 +408,9 @@ internal sealed class TaskTools(
                 rcon.print('{"error":"no_entity"}')
                 return
             end
-            local src = e.get_inventory(defines.inventory.furnace_source)
-            local dst = e.get_inventory(defines.inventory.furnace_result)
+            {{FactorioService.LuaInventoryTypes}}
+            local src = e.get_inventory(inventory_type("furnace_source"))
+            local dst = e.get_inventory(inventory_type("furnace_result"))
             local src_count = src and src.get_item_count("{{ore}}") or 0
             local dst_count = dst and dst.get_item_count("{{outputItem}}") or 0
             local status_names = {}
